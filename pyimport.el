@@ -173,11 +173,51 @@ return 'from foo import y as z'."
         (when matching-aliases
           (format "import %s" (nth 0 matching-aliases))))))))
 
-(defun pyimport--buffers-in-mode (modes)
+(defun pyimport--buffers-in-mode (modes &optional buffers)
   "Return a list of all the buffers with major modes MODES."
   (--filter (with-current-buffer it
               (member major-mode modes))
-            (buffer-list)))
+            (or buffers (buffer-list))))
+
+(defvar pyimport--cache-import nil)
+(defvar pyimport--cache-import-stdlib nil)
+
+(defun pyimport--candidate-import-lines (current-project)
+  (let* ((dir (project-root current-project))
+         (active-buffers (buffer-list))
+         (target (format "~/zcache.%s" (sha1 dir)))
+         (result nil))
+    (when (not pyimport--cache-import)
+      (if (not (file-exists-p target))
+          (let ((buffer nil))
+            (dolist (item (if dir
+                              (directory-files-recursively dir "\\.py\\'")
+                            (pyimport '(python-mode python-ts-mode) active-buffers)))
+              (setq buffer (if (bufferp item)
+                               item
+                             (find-file-noselect item)))
+              (dolist (line (pyimport--import-lines buffer))
+                (push line result))
+              (if (not (member buffer active-buffers))
+                  (kill-buffer buffer)))
+
+            (setq result (-uniq result))
+            (write-region (mapconcat (lambda (s) s) result "\n") nil target))
+        (dolist (line (split-string (with-temp-buffer
+                                      (insert-file-contents target)
+                                      (buffer-string))
+                                    "\n"))
+          (push line result)))
+
+      (when (not pyimport--cache-import-stdlib)
+        (dolist (line (split-string (with-temp-buffer
+                                      (insert-file-contents "~/zcache.py39")
+                                      (buffer-string))
+                                    "\n"))
+          (push line pyimport--cache-import-stdlib)))
+      (setq result (-uniq (append result pyimport--cache-import-stdlib)))
+      (setq pyimport--cache-import result))
+    pyimport--cache-import))
 
 (defun pyimport--syntax-highlight (str)
   "Apply font-lock properties to a string STR of Python code."
@@ -199,15 +239,15 @@ This is a simple heuristic: we just look for imports in all open Python buffers.
   (interactive "P")
   (let ((symbol (thing-at-point 'symbol))
         (matching-lines nil)
-        (case-fold-search nil))
+        (case-fold-search nil)
+        (active-buffers (buffer-list)))
     (unless symbol
       (user-error "No symbol at point"))
     (setq symbol (substring-no-properties symbol))
     ;; Find all the import lines in all Python buffers
-    (dolist (buffer (pyimport--buffers-in-mode '(python-mode python-ts-mode)))
-      (dolist (line (pyimport--import-lines buffer))
-        (-if-let (import (pyimport--extract-simple-import line symbol))
-            (push import matching-lines))))
+    (dolist (line (pyimport--candidate-import-lines (project-current)))
+      (-if-let (import (pyimport--extract-simple-import line symbol))
+          (push import matching-lines)))
 
     ;; Remove duplicates.
     (setq matching-lines (-uniq matching-lines))
