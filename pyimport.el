@@ -114,11 +114,11 @@ To terminate the loop early, throw 'break."
     (if same-pkg-lines
         ;; Find the first matching line, and append there
         (pyimport--for-each-line
-          (when (pyimport--same-module (pyimport--current-line) line)
-            (-let [(_ _module _ name) (s-split " " line)]
-              (pyimport--insert-from-symbol name))
-            ;; Break from this loop.
-            (throw 'break nil)))
+         (when (pyimport--same-module (pyimport--current-line) line)
+           (-let [(_ _module _ name) (s-split " " line)]
+             (pyimport--insert-from-symbol name))
+           ;; Break from this loop.
+           (throw 'break nil)))
 
       ;; We don't have any imports for this module yet, so just insert
       ;; LINE as-is.
@@ -182,41 +182,51 @@ return 'from foo import y as z'."
 (defvar pyimport--cache-import nil)
 (defvar pyimport--cache-import-stdlib nil)
 
+(add-hook 'after-save-hook (lambda ()
+                             (when (member major-mode '(python-mode python-ts-mode))
+                               (setq pyimport--cache-import nil))))
+
 (defun pyimport--candidate-import-lines (current-project)
-  (let* ((dir (project-root current-project))
+  (let* ((project-dir (project-root current-project))
+         (pyimport-dir (file-name-concat project-dir ".pyimport"))
          (active-buffers (buffer-list))
-         (target (format "~/zcache.%s" (sha1 dir)))
-         (result nil))
+         (target (file-name-concat pyimport-dir "project.txt"))
+         (file-cache-stdlib (file-name-concat pyimport-dir "stdlib.txt"))
+         (import-lines nil))
     (when (not pyimport--cache-import)
       (if (not (file-exists-p target))
           (let ((buffer nil))
-            (dolist (item (if dir
-                              (directory-files-recursively dir "\\.py\\'")
-                            (pyimport '(python-mode python-ts-mode) active-buffers)))
-              (setq buffer (if (bufferp item)
-                               item
-                             (find-file-noselect item)))
+            (dolist (item (if project-dir
+                              (directory-files-recursively project-dir "\\.py\\'")
+                            (pyimport--buffer-in-mode '(python-mode python-ts-mode) active-buffers)))
+              (setq buffer (if (bufferp item) item (find-file-noselect item)))
               (dolist (line (pyimport--import-lines buffer))
-                (push line result))
+                (push line import-lines))
               (if (not (member buffer active-buffers))
                   (kill-buffer buffer)))
 
-            (setq result (-uniq result))
-            (write-region (mapconcat (lambda (s) s) result "\n") nil target))
+            (setq import-lines (-uniq import-lines))
+
+            (if (not (file-exists-p (file-name-directory target)))
+                (make-directory (file-name-directory target) t))
+            (write-region (mapconcat (lambda (s) s) import-lines "\n") nil target))
+
         (dolist (line (split-string (with-temp-buffer
                                       (insert-file-contents target)
                                       (buffer-string))
                                     "\n"))
-          (push line result)))
+          (push line import-lines)))
 
       (when (not pyimport--cache-import-stdlib)
-        (dolist (line (split-string (with-temp-buffer
-                                      (insert-file-contents "~/zcache.py39")
-                                      (buffer-string))
-                                    "\n"))
-          (push line pyimport--cache-import-stdlib)))
-      (setq result (-uniq (append result pyimport--cache-import-stdlib)))
-      (setq pyimport--cache-import result))
+        (when (file-exists-p file-cache-stdlib)
+          (dolist (line (split-string (with-temp-buffer
+                                        (insert-file-contents file-cache-stdlib)
+                                        (buffer-string))
+                                      "\n"))
+            (push line pyimport--cache-import-stdlib))))
+
+      (setq import-lines (-uniq (append import-lines pyimport--cache-import-stdlib)))
+      (setq pyimport--cache-import import-lines))
     pyimport--cache-import))
 
 (defun pyimport--syntax-highlight (str)
