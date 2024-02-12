@@ -173,61 +173,106 @@ return 'from foo import y as z'."
         (when matching-aliases
           (format "import %s" (nth 0 matching-aliases))))))))
 
-(defun pyimport--buffers-in-mode (modes &optional buffers)
-  "Return a list of all the buffers with major modes MODES."
-  (--filter (with-current-buffer it
-              (member major-mode modes))
-            (or buffers (buffer-list))))
 
-(defvar pyimport--cache-import nil)
-(defvar pyimport--cache-import-stdlib nil)
+;; WIP
 
-(add-hook 'after-save-hook (lambda ()
-                             (when (member major-mode '(python-mode python-ts-mode))
-                               (setq pyimport--cache-import nil))))
+(defvar pyimport-develop-packages nil
+  "List of packages or modules being developed.")
 
-(defun pyimport--candidate-import-lines (current-project)
-  (let* ((project-dir (project-root current-project))
-         (pyimport-dir (file-name-concat project-dir ".pyimport"))
-         (active-buffers (buffer-list))
-         (target (file-name-concat pyimport-dir "project.txt"))
-         (file-cache-stdlib (file-name-concat pyimport-dir "stdlib.txt"))
-         (import-lines nil))
-    (when (not pyimport--cache-import)
-      (if (not (file-exists-p target))
-          (let ((buffer nil))
-            (dolist (item (if project-dir
-                              (directory-files-recursively project-dir "\\.py\\'")
-                            (pyimport--buffer-in-mode '(python-mode python-ts-mode) active-buffers)))
-              (setq buffer (if (bufferp item) item (find-file-noselect item)))
-              (dolist (line (pyimport--import-lines buffer))
-                (push line import-lines))
-              (if (not (member buffer active-buffers))
-                  (kill-buffer buffer)))
+(defvar pyimport--cache-imports nil)
 
-            (setq import-lines (-uniq import-lines))
+(add-hook 'after-save-hook
+          (lambda ()
+            (when (member major-mode '(python-mode python-ts-mode))
+              (pyimport-make-imports-develop)
+              (setq pyimport--cache-import nil))))
 
-            (if (not (file-exists-p (file-name-directory target)))
-                (make-directory (file-name-directory target) t))
-            (write-region (mapconcat (lambda (s) s) import-lines "\n") nil target))
+(defun pyimport--project-cache-dir ()
+  "Project imports cache directory."
+  (if (and project-current
+           (project-root (project-current)))
+      (expand-file-name ".pyimport" (project-root (project-current)))))
 
-        (dolist (line (split-string (with-temp-buffer
-                                      (insert-file-contents target)
-                                      (buffer-string))
-                                    "\n"))
-          (push line import-lines)))
+(defun pyimport--python-make-imports-script ()
+  "Full path to make-imports.py script."
+  (expand-file-name "bin/make-imports.py"
+                    (file-name-directory (symbol-file 'pyimport))))
 
-      (when (not pyimport--cache-import-stdlib)
-        (when (file-exists-p file-cache-stdlib)
-          (dolist (line (split-string (with-temp-buffer
-                                        (insert-file-contents file-cache-stdlib)
-                                        (buffer-string))
-                                      "\n"))
-            (push line pyimport--cache-import-stdlib))))
+(defun pyimport--run-python-script (category args)
+  (let* ((virtual-env (getenv "VIRTUAL_ENV"))
+         (interpreter (or (and virtual-env
+                               (format "%s/bin/python" virtual-env))
+                          python-interpreter))
+         (python-script (pyimport--python-make-imports-script))
+         (args (append `(,interpreter) `(,python-script) args))
+         (command (mapconcat #'identity args " "))
+         ;; (command (mapconcat #'shell-quote-argument args " "))
+         (output (or (and virtual-env
+                          (expand-file-name category
+                                            (pyimport--project-cache-dir)))
+                     (format "%s/.pyimport/%s" (getenv "HOME") category))))
+    (message "COMMAND %s" command)
+    (let ((buffer-stdout "*pyimport-make-imports*")
+          (buffer-stderr "*pyimport-make-imports-error*"))
+      (shell-command command buffer-stdout buffer-stderr)
+      (save-excursion
+        (switch-to-buffer buffer-stdout t)
+        (unless (file-exists-p (file-name-directory output))
+          (make-directory (file-name-directory output) t))
+        (write-region (buffer-string) nil output))
+      (kill-buffer buffer-stdout))))
 
-      (setq import-lines (-uniq (append import-lines pyimport--cache-import-stdlib)))
-      (setq pyimport--cache-import import-lines))
-    pyimport--cache-import))
+;;;###autoload
+(defun pyimport-make-imports-stdlib (&optional packages)
+  (interactive)
+  (pyimport--run-python-script "stdlib" '("--stdlib")))
+
+;;;###autoload
+(defun pyimport-make-imports-thirdparty (&optional packages)
+  (interactive)
+  (pyimport--run-python-script "thirdparty"
+                       (append '("--thirdparty")
+                               packages
+                               (apply #'append
+                                      (mapcar (lambda (s) `("-e" ,s))
+                                              pyimport-develop-packages)))))
+
+;;;###autoload
+(defun pyimport-make-imports-develop (&optional packages)
+  (interactive)
+  (pyimport--run-python-script "develop"
+                       (append '("--develop")
+                               (or packages
+                                   pyimport-develop-packages))))
+
+(defun pyimport--candidate-import-lines ()
+  (when (not pyimport--cache-imports)
+    (let ((virtual-env (getenv "VIRTUAL_ENV"))
+          import-lines)
+      (dolist (category '("develop" "thirdparty" "stdlib"))
+        (let ((cache-file (expand-file-name category
+                                            (or (and virtual-env
+                                                     (pyimport--project-cache-dir))
+                                                (format "%s/.pyimport" (getenv "HOME"))))))
+          (if (file-exists-p cache-file)
+              (dolist (line (split-string (with-temp-buffer
+                                            (insert-file-contents cache-file)
+                                            (buffer-string))
+                                          "\n"))
+                (push line import-lines)))))
+
+      (unless virtual-env
+        (dolist (buffer (--filter (with-current-buffer it
+                                    (member major-mode '(python-mode python-ts-mode)))
+                                  (buffer-list)))
+          (dolist (line (pyimport--import-lines buffer))
+            (push line import-lines))))
+
+      (setq import-lines (-uniq import-lines))
+      (setq pyimport--cache-imports import-lines)))
+  pyimport--cache-imports)
+
+;; WIP ENDS
 
 (defun pyimport--syntax-highlight (str)
   "Apply font-lock properties to a string STR of Python code."
@@ -255,7 +300,7 @@ This is a simple heuristic: we just look for imports in all open Python buffers.
       (user-error "No symbol at point"))
     (setq symbol (substring-no-properties symbol))
     ;; Find all the import lines in all Python buffers
-    (dolist (line (pyimport--candidate-import-lines (project-current)))
+    (dolist (line (pyimport--candidate-import-lines))
       (-if-let (import (pyimport--extract-simple-import line symbol))
           (push import matching-lines)))
 

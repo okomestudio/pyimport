@@ -2,7 +2,8 @@
 import inspect
 import logging
 import pkgutil
-from importlib import import_module
+from argparse import ArgumentParser
+from importlib import import_module, metadata
 from sys import stdlib_module_names
 
 logger = logging.getLogger(__name__)
@@ -68,23 +69,79 @@ def process(parts, result):
                 result.append(write(parts + [name]))
 
 
-result = []
+def _process_packages(iterable):
+    result = []
+    for package in iterable:
+        process([package], result)
 
-exclude = ["antigravity", "idlelib", "test", "this"]
-
-#for _, module_name, _ in pkgutil.iter_modules():
-for module_name in stdlib_module_names:
-    if (module_name in exclude) or (module_name.startswith("_")):
-        continue
-    process([module_name], result)
-
-for i in sorted(result):
-    print(i)
+    for i in sorted(result):
+        print(i)
 
 
+# pkgutil.iter_modules()
+# sys.stdlib_module_names
 # for distribution in importlib.metadata.distributions():
 #    print(distribution.metadata['Name'], distribution.metadata['Version'])
 
-# or
 
-# pkgutil.iter_modules()
+def dump_stdlib_imports(packages=None, excludes=None):
+    excludes = excludes or set(["antigravity", "idlelib", "test", "this"])
+    if packages:
+        packages = (
+            package
+            for package in packages
+            if package in stdlib_module_names and package not in excludes
+        )
+    else:
+        packages = (
+            package for package in stdlib_module_names if package not in excludes
+        )
+
+    packages = (
+        package
+        for package in packages
+        if not package.startswith("_") or package == "__future__"
+    )
+    _process_packages(packages)
+
+
+def dump_thirdparty_imports(packages=None, excludes=None):
+    excludes = excludes or set()
+    # packages = (
+    #     packages
+    #     if packages
+    #     else (dist.metadata["Name"] for dist in metadata.distributions())
+    # )
+    packages = (
+        package
+        for package in (
+            packages or (dist.metadata["Name"] for dist in metadata.distributions())
+        )
+        if package not in excludes
+    )
+    _process_packages(packages)
+
+
+def dump_develop_imports(packages=None, excludes=None):
+    excludes = excludes or set()
+    packages = (package for package in (packages or []) if package not in excludes)
+    _process_packages(packages)
+
+
+if __name__ == "__main__":
+    p = ArgumentParser()
+    p.add_argument("package", nargs="*")
+    p.add_argument("--exclude", "-e", action="append")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--stdlib", action="store_true")
+    group.add_argument("--thirdparty", action="store_true")
+    group.add_argument("--develop", action="store_true", default=True)
+    args = p.parse_args()
+    if args.stdlib:
+        dump_stdlib_imports(args.package, args.exclude)
+    elif args.thirdparty:
+        dump_thirdparty_imports(args.package, args.exclude)
+    elif args.develop:
+        dump_develop_imports(args.package, args.exclude)
+    else:
+        raise RuntimeError("Bad option")
