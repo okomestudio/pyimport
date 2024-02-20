@@ -1,1 +1,5 @@
 .cask
+
+# Python
+.python-version
+.pyimport/
